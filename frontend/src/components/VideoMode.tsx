@@ -26,6 +26,7 @@ export const VideoMode: React.FC = () => {
   const isMicActiveRef = useRef<boolean>(false);
   const isCyclingRef = useRef<boolean>(false);
   const isSpeakingRef = useRef<boolean>(false);
+  const isThrottledRef = useRef<boolean>(false); // 🚀 Circuit breaker tracking state
   
   const audioPlaybackQueueRef = useRef<string[]>([]);
   const isMediaChannelPlayingRef = useRef<boolean>(false);
@@ -48,13 +49,11 @@ export const VideoMode: React.FC = () => {
 
   // --- CONNECT UNIFIED MULTI-MODAL PROXY TUNNEL ---
   useEffect(() => {
-    // Locks hardware profile into shared recording/playback capabilities when view initializes
     Audio.setAudioModeAsync({
       allowsRecordingIOS: true,
       playsInSilentModeIOS: true,
     }).catch(err => console.log('Audio profile bootstrap initialization skipped:', err));
 
-    // ⚠️ Note: Remember to add your unique Render subdomain suffix here if needed
     const ws = new WebSocket('wss://my-multimodal-server.onrender.com');
     socketRef.current = ws;
 
@@ -63,6 +62,23 @@ export const VideoMode: React.FC = () => {
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+
+        // 🚀 CIRCUIT BREAKER INTERCEPTOR: Stops background sampling instantly if 429 is hit
+        if (data.type === 'SYSTEM_ERROR' && data.code === 'RATE_LIMIT_429') {
+          console.log('🛑 Circuit Breaker Tripped! Freezing background vision sampling.');
+          isThrottledRef.current = true;
+          stopVisionCaptureLoop();
+          setVideoSubtitles('Gemini Rate Limit (429) active. Pausing background vision scanner for 60 seconds to cool down...');
+          setCurrentWordIndex(0);
+          setIsAiReplying(false);
+
+          setTimeout(() => {
+            console.log('🔄 Circuit Breaker Reset. Ready to resume loops.');
+            isThrottledRef.current = false;
+            if (isVisionStreaming) startVisionCaptureLoop();
+          }, 60000);
+          return;
+        }
 
         if (data.type === 'TOKEN_STREAM') {
           if (!isAiReplyingRef.current) {
@@ -95,7 +111,7 @@ export const VideoMode: React.FC = () => {
       stopAllActiveAudioStreams();
       if (playbackTimerRef.current) clearTimeout(playbackTimerRef.current);
     };
-  }, []);
+  }, [isVisionStreaming]);
 
   // --- NATIVE SPEAKERS AUDIO DRIVER LOOP ---
   const processAudioPlaybackQueue = async () => {
@@ -154,8 +170,10 @@ export const VideoMode: React.FC = () => {
   // --- AUTOMATED BACKGROUND VISION SAMPLER ---
   const startVisionCaptureLoop = () => {
     stopVisionCaptureLoop();
+    if (isThrottledRef.current) return; // Block startup if cooling down
+
     visionIntervalRef.current = setInterval(async () => {
-      if (cameraRef.current && socketRef.current?.readyState === WebSocket.OPEN && !isMicActiveRef.current && !isAiReplyingRef.current) {
+      if (cameraRef.current && socketRef.current?.readyState === WebSocket.OPEN && !isMicActiveRef.current && !isAiReplyingRef.current && !isThrottledRef.current) {
         try {
           const photo = await cameraRef.current.takePictureAsync({
             quality: 0.10, 
@@ -163,7 +181,7 @@ export const VideoMode: React.FC = () => {
             skipProcessing: true
           });
 
-          if (photo?.base64 && !isMicActiveRef.current) {
+          if (photo?.base64 && !isMicActiveRef.current && !isThrottledRef.current) {
             socketRef.current.send(JSON.stringify({
               type: 'VISION_FRAME',
               data: photo.base64
@@ -171,7 +189,7 @@ export const VideoMode: React.FC = () => {
           }
         } catch (err) {}
       }
-    }, 5000); 
+    }, 4000); // Optimized to 4 seconds to balance response times and API quotas
   };
 
   const stopVisionCaptureLoop = () => {
@@ -213,10 +231,7 @@ export const VideoMode: React.FC = () => {
   };
 
   const activateMicrophoneHardware = async () => {
-    if (isCyclingRef.current || recordingRef.current) {
-      console.log('🎙️ Guard Lock: Recorder already active or preparing. Bailing.');
-      return;
-    }
+    if (isCyclingRef.current || recordingRef.current) return;
     isCyclingRef.current = true;
 
     try {
@@ -245,8 +260,6 @@ export const VideoMode: React.FC = () => {
       await activeRecord.stopAndUnloadAsync();
       const uri = activeRecord.getURI();
 
-      // 🚀 INTEGRATION PHASE INTERRUPT: The user is completely done speaking.
-      // Halt historical playback queues right now to parse the new query framework cleanly.
       await stopAllActiveAudioStreams();
       if (socketRef.current?.readyState === WebSocket.OPEN) {
         socketRef.current.send('SIGNAL:STOP_STREAM');
@@ -279,10 +292,7 @@ export const VideoMode: React.FC = () => {
   };
 
   const rearmMicrophoneTracking = async () => {
-    if (!isMicActiveRef.current || isCyclingRef.current || recordingRef.current) {
-      console.log('🎙️ Guard Lock: Rearm skipped to prevent resource overlap.');
-      return;
-    }
+    if (!isMicActiveRef.current || isCyclingRef.current || recordingRef.current) return;
     isCyclingRef.current = true;
 
     try {
@@ -355,8 +365,6 @@ export const VideoMode: React.FC = () => {
     const nextState = !isMicActive;
     setIsMicActive(nextState);
     if (nextState) {
-      // 🚀 FIXED: Removed stopAllActiveAudioStreams() and flag resets from here.
-      // The AI audio keeps outputting out loud while the mic launches concurrently.
       activateMicrophoneHardware();
     } else {
       teardownAudioHardware();

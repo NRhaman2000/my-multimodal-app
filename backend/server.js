@@ -12,7 +12,6 @@ if (!process.env.GEMINI_API_KEY) {
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// CREATE A BASE HTTP SERVER TO ANSWER CLOUD PROBES & KEEP-ALIVES
 const server = http.createServer((req, res) => {
   if (req.url === '/health' || req.url === '/') {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -23,7 +22,6 @@ const server = http.createServer((req, res) => {
   }
 });
 
-// MOUNT THE WEBSOCKET MATRIX DIRECTLY ONTO THE HTTP ROUTER
 const wss = new WebSocketServer({ server });
 const PORT = process.env.PORT || 5001; 
 
@@ -87,8 +85,6 @@ wss.on('connection', (ws) => {
           console.log(`\n💬 Incoming chat query packet: "${packet.text}"`);
           try {
             const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
-            
-            // Standardized multi-part array input payload compatibility 
             const result = await model.generateContentStream([packet.text]);
 
             for await (const chunk of result.stream) {
@@ -103,13 +99,14 @@ wss.on('connection', (ws) => {
           } catch (apiErr) {
             console.error('❌ Generation route crash detailed logs:', apiErr);
             if (ws.readyState === 1) {
-              // Smart client diagnostic router
               const isRateLimited = apiErr.status === 429 || apiErr.message?.includes('429') || apiErr.message?.includes('Too Many Requests');
-              const dynamicErrorText = isRateLimited 
-                ? 'Rate limit hit (429: Too Many Requests). Google has throttled your free tier API key. Please sit tight and wait 60 seconds before sending your next message.'
-                : 'Error generating token response payload.';
-
-              ws.send(JSON.stringify({ type: 'TEXT_TOKEN', text: dynamicErrorText }));
+              
+              if (isRateLimited) {
+                ws.send(JSON.stringify({ type: 'SYSTEM_ERROR', code: 'RATE_LIMIT_429' }));
+                ws.send(JSON.stringify({ type: 'TEXT_TOKEN', text: 'Rate limit hit (429: Too Many Requests). Google has throttled your free tier API key. Background capture loops have been frozen for 60 seconds to recover.' }));
+              } else {
+                ws.send(JSON.stringify({ type: 'TEXT_TOKEN', text: 'Error generating token response payload.' }));
+              }
               ws.send(JSON.stringify({ type: 'TEXT_STREAM_COMPLETE' }));
             }
           }
@@ -189,7 +186,16 @@ async function streamLiveGeminiAudioResponse(ws, promptPayload, abortController)
     } catch (error) {
       console.log(`\n⚠️ ERROR INTERCEPTED on ${modelName}.`);
       const isServerOverloaded = error.status === 503 || error.status === 429 || error.message?.includes('503') || error.message?.includes('429');
-      if (isServerOverloaded && modelName !== modelTiers[modelTiers.length - 1]) continue;
+      
+      if (isServerOverloaded) {
+        if (error.status === 429 || error.message?.includes('429')) {
+          if (ws.readyState === 1) {
+            ws.send(JSON.stringify({ type: 'SYSTEM_ERROR', code: 'RATE_LIMIT_429' }));
+          }
+        }
+        if (modelName !== modelTiers[modelTiers.length - 1]) continue;
+      }
+      
       if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'STREAM_COMPLETE' }));
       break;
     }
