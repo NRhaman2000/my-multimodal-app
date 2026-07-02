@@ -87,7 +87,11 @@ wss.on('connection', (ws) => {
           console.log(`\n💬 Incoming text query packet: "${packet.text}"`);
           try {
             const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
-            const result = await model.generateContentStream(packet.text);
+            
+            // 🚀 THE CRASH FIX: Wrap prompt inside an explicit structured content array object
+            const result = await model.generateContentStream({
+              contents: [{ role: 'user', parts: [{ text: packet.text }] }]
+            });
 
             for await (const chunk of result.stream) {
               const chunkText = chunk.text();
@@ -99,9 +103,9 @@ wss.on('connection', (ws) => {
               ws.send(JSON.stringify({ type: 'TEXT_STREAM_COMPLETE' }));
             }
           } catch (apiErr) {
-            console.error('❌ Text generation crash:', apiErr);
+            console.error('❌ Text generation crash detail:', apiErr);
             if (ws.readyState === 1) {
-              ws.send(JSON.stringify({ type: 'TEXT_TOKEN', text: 'Connection timed out.' }));
+              ws.send(JSON.stringify({ type: 'TEXT_TOKEN', text: 'Error generating token response payload.' }));
               ws.send(JSON.stringify({ type: 'TEXT_STREAM_COMPLETE' }));
             }
           }

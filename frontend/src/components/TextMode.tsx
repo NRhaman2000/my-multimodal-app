@@ -32,52 +32,55 @@ export const TextMode: React.FC = () => {
 
   // --- CONNECT TO YOUR ACTIVE BACKEND ROUTER ---
   useEffect(() => {
-    // 🚀 Uses your exact active Ngrok tunnel link
+    // ⚠️ CRITICAL: Replace 'my-multimodal-server' below with your exact unique Render app link!
+    // Example: wss://your-unique-app-name.onrender.com
     const ws = new WebSocket('wss://my-multimodal-server.onrender.com');
     socketRef.current = ws;
 
     ws.onopen = () => console.log('💬 Text channel linked to server socket successfully.');
 
     ws.onmessage = (event) => {
-  try {
-    const data = JSON.parse(event.data);
+      try {
+        const data = JSON.parse(event.data);
 
-    // 🚀 THE FIX: Use an explicit .map() iterator to guarantee clean state redraws
-    if (data.type === 'TEXT_TOKEN') {
-      currentAiMessageRef.current += data.text;
-      
-      setMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === 'streaming_id' 
-            ? { ...msg, text: currentAiMessageRef.current } 
-            : msg
-        )
-      );
-    }
+        // Uses an explicit .map() iterator to guarantee clean state redraws
+        if (data.type === 'TEXT_TOKEN') {
+          currentAiMessageRef.current += data.text;
+          
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === 'streaming_id' 
+                ? { ...msg, text: currentAiMessageRef.current } 
+                : msg
+            )
+          );
+        }
 
-    if (data.type === 'TEXT_STREAM_COMPLETE') {
-      setIsAiStreaming(false); // 🔓 Unlocks your text box instantly
-      setMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === 'streaming_id' 
-            ? { ...msg, id: `ai_${Date.now()}` } 
-            : msg
-        )
-      );
-    }
-  } catch (err) {
-    console.error('Failed to parse text token frame:', err);
-  }
-};
+        if (data.type === 'TEXT_STREAM_COMPLETE') {
+          setIsAiStreaming(false); // Unlocks your text box instantly
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === 'streaming_id' 
+                ? { ...msg, id: `ai_${Date.now()}` } 
+                : msg
+            )
+          );
+        }
+      } catch (err) {
+        console.error('Failed to parse text token frame:', err);
+      }
+    };
 
-// 🛡️ SAFETY NET: If the socket throws an error, don't lock the user out forever
-ws.onerror = (e) => {
-  console.error('Text socket failure:', e);
-  setIsAiStreaming(false); 
-};
+    // 🛡️ COMBINED SAFETY NET: Logs the error and unlocks the input box if the connection drops
+    ws.onerror = (e) => {
+      console.error('Text socket failure details:', e);
+      setIsAiStreaming(false); 
+    };
 
-    ws.onerror = (e) => console.error('Text socket failure:', e);
-    ws.onclose = () => console.log('Text channel closed.');
+    ws.onclose = () => {
+      console.log('Text channel closed.');
+      setIsAiStreaming(false);
+    };
 
     return () => { ws.close(); };
   }, []);
@@ -111,12 +114,16 @@ ws.onerror = (e) => {
     setMessages((prev) => [...prev, userMsg, placeholderAiMsg]);
     setIsAiStreaming(true);
 
-    // 3. Dispatch raw prompt vector across your secure Ngrok tunnel socket
+    // 3. Dispatch raw prompt vector across your secure tunnel socket
     if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
       socketRef.current.send(JSON.stringify({
         type: 'TEXT_PROMPT',
         text: userPrompt
       }));
+    } else {
+      // Fallback fallback handle if socket isn't open during tap event
+      console.log('Socket not ready. Attempting to clear locked interface states.');
+      setIsAiStreaming(false);
     }
   };
 

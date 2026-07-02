@@ -48,6 +48,13 @@ export const VideoMode: React.FC = () => {
 
   // --- CONNECT UNIFIED MULTI-MODAL PROXY TUNNEL ---
   useEffect(() => {
+    // Locks hardware profile into shared recording/playback capabilities when view initializes
+    Audio.setAudioModeAsync({
+      allowsRecordingIOS: true,
+      playsInSilentModeIOS: true,
+    }).catch(err => console.log('Audio profile bootstrap initialization skipped:', err));
+
+    // ⚠️ Note: Remember to add your unique Render subdomain suffix here if needed
     const ws = new WebSocket('wss://my-multimodal-server.onrender.com');
     socketRef.current = ws;
 
@@ -90,7 +97,7 @@ export const VideoMode: React.FC = () => {
     };
   }, []);
 
-  // --- NATIVE SPEAKERS AUDIO driver LOOP ---
+  // --- NATIVE SPEAKERS AUDIO DRIVER LOOP ---
   const processAudioPlaybackQueue = async () => {
     if (isMediaChannelPlayingRef.current) return;
 
@@ -148,11 +155,10 @@ export const VideoMode: React.FC = () => {
   const startVisionCaptureLoop = () => {
     stopVisionCaptureLoop();
     visionIntervalRef.current = setInterval(async () => {
-      // Only capture background images if the mic is off and AI isn't currently speaking
       if (cameraRef.current && socketRef.current?.readyState === WebSocket.OPEN && !isMicActiveRef.current && !isAiReplyingRef.current) {
         try {
           const photo = await cameraRef.current.takePictureAsync({
-            quality: 0.10, // Downscaled to keep the socket channel fast
+            quality: 0.10, 
             base64: true,
             skipProcessing: true
           });
@@ -165,7 +171,7 @@ export const VideoMode: React.FC = () => {
           }
         } catch (err) {}
       }
-    }, 3000); // Analyzes your view smoothly every 3 seconds
+    }, 3000); 
   };
 
   const stopVisionCaptureLoop = () => {
@@ -196,7 +202,7 @@ export const VideoMode: React.FC = () => {
           silenceStartTimestampRef.current = Date.now();
         } else {
           const elapsedSilence = Date.now() - silenceStartTimestampRef.current;
-          if (elapsedSilence >= SILENCE_DURATION_MS && !isAiReplyingRef.current) {
+          if (elapsedSilence >= SILENCE_DURATION_MS) {
             isSpeakingRef.current = false;
             silenceStartTimestampRef.current = null;
             transmitAudioTurnSegment();
@@ -207,11 +213,13 @@ export const VideoMode: React.FC = () => {
   };
 
   const activateMicrophoneHardware = async () => {
-    if (isCyclingRef.current) return;
+    if (isCyclingRef.current || recordingRef.current) {
+      console.log('🎙️ Guard Lock: Recorder already active or preparing. Bailing.');
+      return;
+    }
     isCyclingRef.current = true;
 
     try {
-      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
       const recordInstance = new Audio.Recording();
       await recordInstance.prepareToRecordAsync({
         ...Audio.RecordingOptionsPresets.HIGH_QUALITY,
@@ -223,6 +231,7 @@ export const VideoMode: React.FC = () => {
       await recordInstance.startAsync();
     } catch (err) {
       console.error(err);
+      recordingRef.current = null;
     } finally { isCyclingRef.current = false; }
   };
 
@@ -236,7 +245,16 @@ export const VideoMode: React.FC = () => {
       await activeRecord.stopAndUnloadAsync();
       const uri = activeRecord.getURI();
 
-      // Take one clear snapshot at the exact millisecond you finish speaking
+      // 🚀 INTEGRATION PHASE INTERRUPT: The user is completely done speaking.
+      // Halt historical playback queues right now to parse the new query framework cleanly.
+      await stopAllActiveAudioStreams();
+      if (socketRef.current?.readyState === WebSocket.OPEN) {
+        socketRef.current.send('SIGNAL:STOP_STREAM');
+      }
+      setVideoSubtitles('Integrating context matrix maps...');
+      setCurrentWordIndex(0);
+      setIsAiReplying(false);
+
       let speechPhotoBase64 = null;
       if (cameraRef.current) {
         const photo = await cameraRef.current.takePictureAsync({ quality: 0.2, base64: true, skipProcessing: true }).catch(() => null);
@@ -246,7 +264,6 @@ export const VideoMode: React.FC = () => {
       if (uri && socketRef.current?.readyState === WebSocket.OPEN) {
         const base64Audio = await FileSystem.readAsStringAsync(uri, { encoding: 'base64' });
         
-        // Deliver the paired vision frame alongside your voice vector
         socketRef.current.send(JSON.stringify({
           type: 'AUDIO_CHUNK',
           mimeType: 'audio/m4a',
@@ -262,11 +279,13 @@ export const VideoMode: React.FC = () => {
   };
 
   const rearmMicrophoneTracking = async () => {
-    if (!isMicActiveRef.current || isCyclingRef.current) return;
+    if (!isMicActiveRef.current || isCyclingRef.current || recordingRef.current) {
+      console.log('🎙️ Guard Lock: Rearm skipped to prevent resource overlap.');
+      return;
+    }
     isCyclingRef.current = true;
 
     try {
-      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
       const freshInstance = new Audio.Recording();
       await freshInstance.prepareToRecordAsync({
         ...Audio.RecordingOptionsPresets.HIGH_QUALITY,
@@ -280,16 +299,17 @@ export const VideoMode: React.FC = () => {
       speechStartTimestampRef.current = null;
       await freshInstance.startAsync();
     } catch (e) {
+      recordingRef.current = null;
     } finally { isCyclingRef.current = false; }
   };
 
   const teardownAudioHardware = async () => {
     try {
       if (recordingRef.current) {
-        await recordingRef.current.stopAndUnloadAsync().catch(() => {});
+        const activeRecordToUnload = recordingRef.current;
         recordingRef.current = null;
+        await activeRecordToUnload.stopAndUnloadAsync().catch(() => {});
       }
-      await Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true });
     } catch (e) {}
   };
 
@@ -297,7 +317,7 @@ export const VideoMode: React.FC = () => {
   const wordsArray = videoSubtitles.split(' ').filter(word => word.trim() !== '');
 
   useEffect(() => {
-    if (wordsArray.length > currentWordIndex && isAiReplying) {
+    if (wordsArray.length > currentWordIndex && wordsArray.length > 0) {
       if (playbackTimerRef.current) clearTimeout(playbackTimerRef.current);
       
       playbackTimerRef.current = setTimeout(() => {
@@ -306,9 +326,9 @@ export const VideoMode: React.FC = () => {
           scrollViewRef.current?.scrollToEnd({ animated: true });
           return nextIndex;
         });
-      }, 360);
+      }, 340); 
     }
-  }, [videoSubtitles, currentWordIndex, wordsArray.length, isAiReplying]);
+  }, [videoSubtitles, currentWordIndex, wordsArray.length]);
 
   const toggleVisionStream = () => {
     if (!isVisionStreaming) {
@@ -318,7 +338,6 @@ export const VideoMode: React.FC = () => {
     } else {
       stopVisionCaptureLoop();
       
-      // 🚀 HARD RULE: Automatically kill and clean the mic channel if active when camera drops
       setIsMicActive(false);
       isMicActiveRef.current = false;
       teardownAudioHardware();
@@ -331,14 +350,13 @@ export const VideoMode: React.FC = () => {
   };
 
   const toggleMicChannel = () => {
-    if (!isVisionStreaming) return; // Hard structural safety lock
+    if (!isVisionStreaming) return; 
     
     const nextState = !isMicActive;
     setIsMicActive(nextState);
     if (nextState) {
-      isAiReplyingRef.current = false;
-      setIsAiReplying(false);
-      stopAllActiveAudioStreams();
+      // 🚀 FIXED: Removed stopAllActiveAudioStreams() and flag resets from here.
+      // The AI audio keeps outputting out loud while the mic launches concurrently.
       activateMicrophoneHardware();
     } else {
       teardownAudioHardware();
@@ -368,7 +386,6 @@ export const VideoMode: React.FC = () => {
         </View>
       )}
 
-      {/* 🔮 CINEMATIC HOVERING SUBTITLE OVERLAY */}
       {videoSubtitles.length > 0 && (
         <View style={styles.floatingSubtitleContainer}>
           <View style={styles.magicalSubCard}>
@@ -398,24 +415,21 @@ export const VideoMode: React.FC = () => {
         </View>
       )}
 
-      {/* DUAL COUPLER HUD CONTROLS ROW */}
       <View style={styles.actionOverlay}>
         <View style={styles.controlsRow}>
-          {/* Microphone Interaction Toggle Button */}
           <TouchableOpacity 
             style={[
               styles.hudButton, 
               isMicActive && styles.micActiveButton,
-              !isVisionStreaming && { opacity: 0.15 } // Deeply dimmed out when unavailable
+              !isVisionStreaming && { opacity: 0.15 } 
             ]} 
             onPress={toggleMicChannel}
-            disabled={!isVisionStreaming} // Hard accessibility lock
+            disabled={!isVisionStreaming} 
             activeOpacity={0.8}
           >
             <Ionicons name={isMicActive ? "mic" : "mic-off"} size={22} color="#FFFFFF" />
           </TouchableOpacity>
 
-          {/* Camera Viewport Toggle Button */}
           <TouchableOpacity 
             style={[styles.hudButton, isVisionStreaming && styles.streamActiveButton]} 
             onPress={toggleVisionStream}
