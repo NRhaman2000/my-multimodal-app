@@ -25,6 +25,15 @@ const server = http.createServer((req, res) => {
 const wss = new WebSocketServer({ server });
 const PORT = process.env.PORT || 5001; 
 
+// 🚀 GLOBAL BROADCAST HELPER: Sends signals to ALL open tabs simultaneously
+const broadcastToAllClients = (payload) => {
+  wss.clients.forEach((client) => {
+    if (client.readyState === 1) {
+      client.send(JSON.stringify(payload));
+    }
+  });
+};
+
 wss.on('connection', (ws) => {
   console.log('📱 Phone client connected over high-speed multimedia bridge.');
   let currentStreamAbortController = null;
@@ -98,15 +107,20 @@ wss.on('connection', (ws) => {
             }
           } catch (apiErr) {
             console.error('❌ Generation route crash detailed logs:', apiErr);
+            
+            const isRateLimited = apiErr.status === 429 || apiErr.message?.includes('429') || apiErr.message?.includes('Too Many Requests');
+            
+            if (isRateLimited) {
+              // 🚀 FIX: Broadcast the error globally to lock down the background Video component too
+              broadcastToAllClients({ type: 'SYSTEM_ERROR', code: 'RATE_LIMIT_429' });
+              ws.send(JSON.stringify({ 
+                type: 'TEXT_TOKEN', 
+                text: 'Rate limit hit (429: Too Many Requests). Google has throttled your free tier API key. All background vision streams have been globally frozen for 60 seconds to recover.' 
+              }));
+            } else {
+              ws.send(JSON.stringify({ type: 'TEXT_TOKEN', text: 'Error generating token response payload.' }));
+            }
             if (ws.readyState === 1) {
-              const isRateLimited = apiErr.status === 429 || apiErr.message?.includes('429') || apiErr.message?.includes('Too Many Requests');
-              
-              if (isRateLimited) {
-                ws.send(JSON.stringify({ type: 'SYSTEM_ERROR', code: 'RATE_LIMIT_429' }));
-                ws.send(JSON.stringify({ type: 'TEXT_TOKEN', text: 'Rate limit hit (429: Too Many Requests). Google has throttled your free tier API key. Background capture loops have been frozen for 60 seconds to recover.' }));
-              } else {
-                ws.send(JSON.stringify({ type: 'TEXT_TOKEN', text: 'Error generating token response payload.' }));
-              }
               ws.send(JSON.stringify({ type: 'TEXT_STREAM_COMPLETE' }));
             }
           }
@@ -189,9 +203,8 @@ async function streamLiveGeminiAudioResponse(ws, promptPayload, abortController)
       
       if (isServerOverloaded) {
         if (error.status === 429 || error.message?.includes('429')) {
-          if (ws.readyState === 1) {
-            ws.send(JSON.stringify({ type: 'SYSTEM_ERROR', code: 'RATE_LIMIT_429' }));
-          }
+          // 🚀 FIX: Broadcast camera freeze signal globally if vision loops cause the 429
+          broadcastToAllClients({ type: 'SYSTEM_ERROR', code: 'RATE_LIMIT_429' });
         }
         if (modelName !== modelTiers[modelTiers.length - 1]) continue;
       }
