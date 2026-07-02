@@ -1,6 +1,6 @@
 // server.js
 require('dotenv').config();
-const http = require('http'); // 🚀 Native HTTP module wrapper
+const http = require('http'); 
 const { WebSocketServer } = require('ws'); 
 const { GoogleGenerativeAI } = require('@google/generative-ai'); 
 const googleTTS = require('google-tts-api'); 
@@ -12,7 +12,7 @@ if (!process.env.GEMINI_API_KEY) {
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// 🚀 CREATE A BASE HTTP SERVER TO ANSWER CLOUD PROBES & KEEP-ALIVES
+// CREATE A BASE HTTP SERVER TO ANSWER CLOUD PROBES & KEEP-ALIVES
 const server = http.createServer((req, res) => {
   if (req.url === '/health' || req.url === '/') {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -23,9 +23,9 @@ const server = http.createServer((req, res) => {
   }
 });
 
-// 🚀 MOUNT THE WEBSOCKET MATRIX DIRECTLY ONTO THE HTTP ROUTER
+// MOUNT THE WEBSOCKET MATRIX DIRECTLY ONTO THE HTTP ROUTER
 const wss = new WebSocketServer({ server });
-const PORT = process.env.PORT || 5001; // Render will dynamically inject its own port here
+const PORT = process.env.PORT || 5001; 
 
 wss.on('connection', (ws) => {
   console.log('📱 Phone client connected over high-speed multimedia bridge.');
@@ -82,14 +82,14 @@ wss.on('connection', (ws) => {
           isAiCurrentlyProcessing = false;
         }
 
-        // --- PIPELINE 3: LIVE TEXT CHAT HANDLER ---
+        // --- PIPELINE 3: LIVE TEXT / VOICE CHAT HANDLER ---
         if (packet.type === 'TEXT_PROMPT') {
-          console.log(`\n💬 Incoming text query packet: "${packet.text}"`);
+          console.log(`\n💬 Incoming chat query packet: "${packet.text}"`);
           try {
             const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
             
-            // 🚀 THE FIX: Restored to use a clean raw text string payload directly
-            const result = await model.generateContentStream(packet.text);
+            // Standardized multi-part array input payload compatibility 
+            const result = await model.generateContentStream([packet.text]);
 
             for await (const chunk of result.stream) {
               const chunkText = chunk.text();
@@ -101,9 +101,15 @@ wss.on('connection', (ws) => {
               ws.send(JSON.stringify({ type: 'TEXT_STREAM_COMPLETE' }));
             }
           } catch (apiErr) {
-            console.error('❌ Text generation crash:', apiErr);
+            console.error('❌ Generation route crash detailed logs:', apiErr);
             if (ws.readyState === 1) {
-              ws.send(JSON.stringify({ type: 'TEXT_TOKEN', text: 'Error generating token response payload.' }));
+              // Smart client diagnostic router
+              const isRateLimited = apiErr.status === 429 || apiErr.message?.includes('429') || apiErr.message?.includes('Too Many Requests');
+              const dynamicErrorText = isRateLimited 
+                ? 'Rate limit hit (429: Too Many Requests). Google has throttled your free tier API key. Please sit tight and wait 60 seconds before sending your next message.'
+                : 'Error generating token response payload.';
+
+              ws.send(JSON.stringify({ type: 'TEXT_TOKEN', text: dynamicErrorText }));
               ws.send(JSON.stringify({ type: 'TEXT_STREAM_COMPLETE' }));
             }
           }
@@ -190,7 +196,6 @@ async function streamLiveGeminiAudioResponse(ws, promptPayload, abortController)
   }
 }
 
-// 🚀 BIND THE SERVER TO OPEN WIRE CHANNELS
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`📡 Network listening matrix online on port ${PORT}.`);
 });

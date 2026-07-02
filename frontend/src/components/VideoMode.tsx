@@ -171,7 +171,7 @@ export const VideoMode: React.FC = () => {
           }
         } catch (err) {}
       }
-    }, 3000); 
+    }, 5000); 
   };
 
   const stopVisionCaptureLoop = () => {

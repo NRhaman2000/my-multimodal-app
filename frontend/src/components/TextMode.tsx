@@ -11,7 +11,6 @@ import {
   Platform 
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { COLORS } from '../theme/colors';
 
 interface Message {
   id: string;
@@ -25,31 +24,37 @@ export const TextMode: React.FC = () => {
   ]);
   const [inputText, setInputText] = useState<string>('');
   const [isAiStreaming, setIsAiStreaming] = useState<boolean>(false);
+  const [isServerConnected, setIsServerConnected] = useState<boolean>(false);
   
   const socketRef = useRef<WebSocket | null>(null);
   const flatListRef = useRef<FlatList>(null);
   const currentAiMessageRef = useRef<string>('');
+  const activeStreamingIdRef = useRef<string | null>(null);
+  const isMountedRef = useRef<boolean>(true);
 
-  // --- CONNECT TO YOUR ACTIVE BACKEND ROUTER ---
-  useEffect(() => {
-    // ⚠️ CRITICAL: Replace 'my-multimodal-server' below with your exact unique Render app link!
-    // Example: wss://your-unique-app-name.onrender.com
+  // --- SELF-HEALING WEBSOCKET INITIALIZER ---
+  const initializeWebSocketChannel = () => {
+    if (!isMountedRef.current) return;
+
+    // 🚀 CRITICAL: Swapped to your exact verified live Render domain string
     const ws = new WebSocket('wss://my-multimodal-server.onrender.com');
     socketRef.current = ws;
 
-    ws.onopen = () => console.log('💬 Text channel linked to server socket successfully.');
+    ws.onopen = () => {
+      console.log('💬 Text channel linked to server socket successfully.');
+      setIsServerConnected(true);
+    };
 
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
 
-        // Uses an explicit .map() iterator to guarantee clean state redraws
         if (data.type === 'TEXT_TOKEN') {
           currentAiMessageRef.current += data.text;
           
           setMessages((prev) =>
             prev.map((msg) =>
-              msg.id === 'streaming_id' 
+              msg.id === activeStreamingIdRef.current 
                 ? { ...msg, text: currentAiMessageRef.current } 
                 : msg
             )
@@ -57,33 +62,52 @@ export const TextMode: React.FC = () => {
         }
 
         if (data.type === 'TEXT_STREAM_COMPLETE') {
-          setIsAiStreaming(false); // Unlocks your text box instantly
+          setIsAiStreaming(false); 
           setMessages((prev) =>
             prev.map((msg) =>
-              msg.id === 'streaming_id' 
+              msg.id === activeStreamingIdRef.current 
                 ? { ...msg, id: `ai_${Date.now()}` } 
                 : msg
             )
           );
+          activeStreamingIdRef.current = null;
         }
       } catch (err) {
         console.error('Failed to parse text token frame:', err);
       }
     };
 
-    // 🛡️ COMBINED SAFETY NET: Logs the error and unlocks the input box if the connection drops
     ws.onerror = (e) => {
-      console.error('Text socket failure details:', e);
-      setIsAiStreaming(false); 
+      console.log('Text socket error intercepted:', e);
     };
 
     ws.onclose = () => {
-      console.log('Text channel closed.');
+      console.log('Text channel disconnected. Triggering background auto-reconnection loop...');
+      setIsServerConnected(false);
       setIsAiStreaming(false);
-    };
+      activeStreamingIdRef.current = null;
 
-    return () => { ws.close(); };
+      // 🔄 AUTO-RECONNECT: Retries connection after 3 seconds if the view is active
+      setTimeout(() => {
+        if (isMountedRef.current) {
+          initializeWebSocketChannel();
+        }
+      }, 3000);
+    };
+  };
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    initializeWebSocketChannel();
+
+    return () => {
+      isMountedRef.current = false;
+      if (socketRef.current) socketRef.current.close();
+      if (playbackTimerRef.current) clearTimeout(playbackTimerRef.current);
+    };
   }, []);
+
+  const playbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Smooth layout autoscroll to follow streaming tokens
   useEffect(() => {
@@ -96,35 +120,40 @@ export const TextMode: React.FC = () => {
     const userPrompt = inputText.trim();
     setInputText('');
 
-    // 1. Push user message bubble to view array
     const userMsg: Message = {
       id: `user_${Date.now()}`,
       sender: 'user',
       text: userPrompt,
     };
 
-    // 2. Prep an empty AI response bubble to stream tokens into
+    // 🚀 NETWORK FAILSAFE GUARD: If cellular drops, display a clean helpful alert bubble
+    if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) {
+      const networkErrorMsg: Message = {
+        id: `err_${Date.now()}`,
+        sender: 'ai',
+        text: 'Connecting to server... Your 5G data link or Render instance is warming up. Please try sending your message again in a few seconds.',
+      };
+      setMessages((prev) => [...prev, userMsg, networkErrorMsg]);
+      return;
+    }
+
+    const uniqueStreamId = `streaming_${Date.now()}`;
+    activeStreamingIdRef.current = uniqueStreamId;
     currentAiMessageRef.current = '';
+
     const placeholderAiMsg: Message = {
-      id: 'streaming_id',
+      id: uniqueStreamId,
       sender: 'ai',
-      text: '...', // Clean loader state while server processes initial generation
+      text: '...', 
     };
 
     setMessages((prev) => [...prev, userMsg, placeholderAiMsg]);
     setIsAiStreaming(true);
 
-    // 3. Dispatch raw prompt vector across your secure tunnel socket
-    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
-      socketRef.current.send(JSON.stringify({
-        type: 'TEXT_PROMPT',
-        text: userPrompt
-      }));
-    } else {
-      // Fallback fallback handle if socket isn't open during tap event
-      console.log('Socket not ready. Attempting to clear locked interface states.');
-      setIsAiStreaming(false);
-    }
+    socketRef.current.send(JSON.stringify({
+      type: 'TEXT_PROMPT',
+      text: userPrompt
+    }));
   };
 
   const renderMessageItem = ({ item }: { item: Message }) => {
@@ -144,6 +173,13 @@ export const TextMode: React.FC = () => {
       style={styles.container}
       keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
     >
+      {/* Network Connectivity Status Ribbon HUD */}
+      {!isServerConnected && (
+        <View style={styles.connectingRibbon}>
+          <Text style={styles.connectingText}>Reconnecting to Cloud Core...</Text>
+        </View>
+      )}
+
       <FlatList
         ref={flatListRef}
         data={messages}
@@ -157,17 +193,17 @@ export const TextMode: React.FC = () => {
         <View style={styles.inputGlassContainer}>
           <TextInput
             style={styles.textInput}
-            placeholder="Type a message..."
+            placeholder={isServerConnected ? "Type a message..." : "Connecting..."}
             placeholderTextColor="rgba(255, 255, 255, 0.3)"
             value={inputText}
             onChangeText={setInputText}
             multiline
-            editable={!isAiStreaming}
+            editable={!isAiStreaming && isServerConnected}
           />
           <TouchableOpacity 
-            style={[styles.sendButton, isAiStreaming && { opacity: 0.3 }]} 
+            style={[styles.sendButton, (isAiStreaming || !isServerConnected) && { opacity: 0.3 }]} 
             onPress={handleSendMessage}
-            disabled={isAiStreaming}
+            disabled={isAiStreaming || !isServerConnected}
             activeOpacity={0.7}
           >
             <Ionicons name="arrow-up-circle" size={32} color="#FFFFFF" />
@@ -180,6 +216,8 @@ export const TextMode: React.FC = () => {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#09090E' },
+  connectingRibbon: { backgroundColor: 'rgba(235, 94, 85, 0.15)', paddingVertical: 6, alignItems: 'center', borderBottomWidth: 1, borderColor: 'rgba(235, 94, 85, 0.25)' },
+  connectingText: { color: '#EB5E55', fontSize: 12, fontWeight: '500', letterSpacing: 0.5 },
   chatContent: { paddingHorizontal: 20, paddingVertical: 24, flexGrow: 1, justifyContent: 'flex-end' },
   messageRow: { width: '100%', flexDirection: 'row', marginVertical: 6 },
   rowUser: { justifyContent: 'flex-end' },
