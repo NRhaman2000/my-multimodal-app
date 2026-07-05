@@ -12,6 +12,7 @@ if (!process.env.GEMINI_API_KEY) {
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
+// CREATE A BASE HTTP SERVER TO ANSWER CLOUD PROBES & KEEP-ALIVES
 const server = http.createServer((req, res) => {
   if (req.url === '/health' || req.url === '/') {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -22,10 +23,11 @@ const server = http.createServer((req, res) => {
   }
 });
 
+// MOUNT THE WEBSOCKET MATRIX DIRECTLY ONTO THE HTTP ROUTER
 const wss = new WebSocketServer({ server });
 const PORT = process.env.PORT || 5001; 
 
-// 🚀 GLOBAL BROADCAST HELPER: Sends signals to ALL open tabs simultaneously
+// GLOBAL BROADCAST HELPER: Sends signals to ALL open tabs simultaneously
 const broadcastToAllClients = (payload) => {
   wss.clients.forEach((client) => {
     if (client.readyState === 1) {
@@ -108,19 +110,21 @@ wss.on('connection', (ws) => {
           } catch (apiErr) {
             console.error('❌ Generation route crash detailed logs:', apiErr);
             
-            const isRateLimited = apiErr.status === 429 || apiErr.message?.includes('429') || apiErr.message?.includes('Too Many Requests');
-            
-            if (isRateLimited) {
-              // 🚀 FIX: Broadcast the error globally to lock down the background Video component too
-              broadcastToAllClients({ type: 'SYSTEM_ERROR', code: 'RATE_LIMIT_429' });
-              ws.send(JSON.stringify({ 
-                type: 'TEXT_TOKEN', 
-                text: 'Rate limit hit (429: Too Many Requests). Google has throttled your free tier API key. All background vision streams have been globally frozen for 60 seconds to recover.' 
-              }));
-            } else {
-              ws.send(JSON.stringify({ type: 'TEXT_TOKEN', text: 'Error generating token response payload.' }));
-            }
             if (ws.readyState === 1) {
+              // 🚀 CRITICAL EVALUATION: Inspecting explicitly for Quota vs Speed constraints
+              const isQuotaExceeded = apiErr.status === 403 || apiErr.message?.includes('RESOURCE_EXHAUSTED') || apiErr.message?.includes('Quota exceeded');
+              const isRateLimited = apiErr.status === 429 || apiErr.message?.includes('429') || apiErr.message?.includes('Too Many Requests');
+              
+              let dynamicErrorText = 'Error generating token response payload.';
+
+              if (isQuotaExceeded) {
+                dynamicErrorText = '🚨 Out of Tokens! Your Gemini API daily usage quota has been fully exhausted. Please try again tomorrow or upgrade your plan.';
+              } else if (isRateLimited) {
+                broadcastToAllClients({ type: 'SYSTEM_ERROR', code: 'RATE_LIMIT_429' });
+                dynamicErrorText = 'Rate limit hit (429: Too Many Requests). Google has throttled your free tier API key. All background vision streams have been globally frozen for 60 seconds to recover.';
+              }
+
+              ws.send(JSON.stringify({ type: 'TEXT_TOKEN', text: dynamicErrorText }));
               ws.send(JSON.stringify({ type: 'TEXT_STREAM_COMPLETE' }));
             }
           }
@@ -199,11 +203,23 @@ async function streamLiveGeminiAudioResponse(ws, promptPayload, abortController)
       successfulStream = true;
     } catch (error) {
       console.log(`\n⚠️ ERROR INTERCEPTED on ${modelName}.`);
+      
+      const isQuotaExceeded = error.status === 403 || error.message?.includes('RESOURCE_EXHAUSTED') || error.message?.includes('Quota exceeded');
       const isServerOverloaded = error.status === 503 || error.status === 429 || error.message?.includes('503') || error.message?.includes('429');
       
+      // 🚀 VIDEO STREAM QUOTA ESCALATION ROUTE
+      if (isQuotaExceeded) {
+        if (ws.readyState === 1) {
+          ws.send(JSON.stringify({ 
+            type: 'TOKEN_STREAM', 
+            text: '🚨 Out of Tokens! Your Gemini API daily usage quota has been fully exhausted.' 
+          }));
+        }
+        break;
+      }
+
       if (isServerOverloaded) {
         if (error.status === 429 || error.message?.includes('429')) {
-          // 🚀 FIX: Broadcast camera freeze signal globally if vision loops cause the 429
           broadcastToAllClients({ type: 'SYSTEM_ERROR', code: 'RATE_LIMIT_429' });
         }
         if (modelName !== modelTiers[modelTiers.length - 1]) continue;
